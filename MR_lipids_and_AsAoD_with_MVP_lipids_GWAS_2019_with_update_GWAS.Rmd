@@ -1,0 +1,672 @@
+---
+title: "MR lipids and BP for AoD"
+author: "Catherine Tcheandjieu"
+date: "4/23/2020"
+output: html_document
+---
+<details><summary>CLICK ME</summary>
+<p>
+```{r setup, include=F,warning=FALSE}
+knitr::opts_chunk$set(echo = T)
+### import all packages needed
+library(TwoSampleMR)
+library(data.table)
+library(dplyr)
+library(R.utils)
+library(MRPRESSO)
+### for this MR, I will use Instrumental variable from the GWAS catalogue for all the analysis
+gwas_catalog<- fread("/Users/catherine/Box/MVP GWAS/GWAS_catalog/gwas_catalog_v1.0.2-associations_e98_r2020-03-08.tsv")
+
+### upload the AoD GWAS 
+AoD.gwas<- fread("/Users/catherine/Documents/result GWAS aorta diameter/results_black_Asian_UKBB/CLEANED.results_glm.AoD.all.white.gz")
+
+AoD.gwas$SNP=AoD.gwas$cptid
+
+AoD.gwas$outcome="AsAoD"
+AoD.gwas<- AoD.gwas[AoD.gwas$PVAL>0.05,]
+
+### get the 1000g snp in Europeans
+
+EUR1000g.bim <- fread("/Users/catherine/Documents/software/g1000_eur/g1000_eur.bim")
+
+### create a chr, pos id
+names(EUR1000g.bim)<- c("chr","snp","cm","pos","A1","A2")
+
+EUR1000g.bim <- EUR1000g.bim %>% mutate(chr_pos=paste(chr,pos,sep=':')) %>% 
+                select(snp,chr_pos)
+```
+</p>
+</details>
+
+## I. MR for Lipids traits
+I will use the GWAS of lipids from the MVP available in the GWAS catalogue (** Klarin D. et al, NatGen, 2018 (PMID:30275531) **)
+
+### I.1 MR for LDL
+<details><summary>CLICK ME</summary>
+<p>
+```{r, echo=T,warning=F}
+### get the LDL GWAS summary stat 
+LDL_gwas<- fread("/Users/catherine/Box/MVP-CAP other local/Manuscripts/MVP lipids GWAS/MVP_Lipid_Summary_Statistics/EUR_EasyQC/CLEANED.MVP.Euro.LDL.results.EQC.csv.gz")
+
+### extract all the SNPs with p<5e
+LDL.sign<- LDL_gwas %>% filter(PVAL<5e-08,PVAL>0,IMPUTATION>0.8) %>% 
+                        mutate(chr=as.integer(sapply(strsplit(cptid,":"),"[",1)),
+                               pos=as.integer(sapply(strsplit(cptid,":"),"[",2)),
+                               SNP=cptid,phenotype="LDL cholesterol")
+                               
+### format the LDL as exposure
+
+LDL.expo.data<- format_data(LDL.sign,
+                            snps=LDL.sign$SNP,
+                            type = "exposure",
+                            phenotype = "phenotype",
+                            beta_col = "BETA",
+                            eaf_col = "EAF",
+                            se_col = "SE",
+                            effect_allele_col = "EFFECT_ALLELE",
+                            other_allele_col = "OTHER_ALLELE",
+                            pval_col = "PVAL",
+                            samplesize_col = "N",
+                            chr_col = "chr",
+                            pos_col = "pos",
+                            min_pval = "1e-314")
+
+
+#### harmonize AOD GWAS and the LDL exposure 
+
+#### create the outcome for the results
+AoD_LDL.outcome<- format_data(AoD.gwas,
+                            snps=LDL.sign$SNP,
+                            snp_col = "cptid",
+                            type = "outcome",
+                            phenotype = "outcome",
+                            beta_col = "BETA",
+                            eaf_col = "EAF",
+                            se_col = "SE",
+                            effect_allele_col = "EFFECT_ALLELE",
+                            other_allele_col = "OTHER_ALLELE",
+                            pval_col = "PVAL",
+                            samplesize_col = "N",
+                            chr_col = "CHR",
+                            pos_col = "POS")
+
+## Harmonized the exposure and outcome data
+dat.LDL <- harmonise_data(
+  exposure_dat = LDL.expo.data, 
+  outcome_dat = AoD_LDL.outcome)
+
+### get only the SNPs from the GWAS catalogue since I'm not able to clump what i have 
+ldl.GWAs.cat<- gwas_catalog %>% filter(PUBMEDID==30275531,`DISEASE/TRAIT`=="LDL cholesterol") %>%  mutate(chr_pos=paste(CHR_ID,CHR_POS,sep=":"))
+
+### keep only the set of SNP that will be use in the MR
+dat.LDL<- dat.LDL %>% filter(mr_keep==TRUE)
+
+snp.data<- dat.LDL %>% mutate(chr_name=chr.exposure,chrom_start=pos.exposure) %>% 
+  select(SNP,chr_name,chrom_start,pval.exposure)
+
+### merge the clump with the rsid from 1000g 
+snp.data <- merge(EUR1000g.bim,snp.data,by.x="chr_pos",by.y = "SNP")
+
+snp.data <- snp.data %>% rename(SNP="snp") 
+
+### clump the harmonized data
+clump.LDL<- clump_data(snp.data) ### after clumping, 88 SNPs were available for the MR
+
+### extract the final set of SNP for the mr
+dat.LDL.final<- dat.LDL %>% filter(SNP%in%clump.LDL$chr_pos)
+res.MR.LDL<-mr(dat.LDL.final)
+
+### check for heterogeneity and pleiotropie
+LDL.het<-mr_heterogeneity(dat.LDL.final) ### heterogenity significant 
+
+## pleio
+LDL.pleio<-mr_pleiotropy_test(dat.LDL.final) ## pleiotropie not signicicant 
+
+### perform a leave out MR
+res_loo.LDL <- mr_leaveoneout(dat.LDL.final) ### no association 
+
+## single level MR 
+res_single.LDL <- mr_singlesnp(dat.LDL.final) ## no signifcant association if MTC applied
+
+### use MR PRESSO to systematicaly evaluate pleiotropie, heterogeneity and remove outlier SNPs 
+Mr.presso.LDL <-mr_presso(BetaOutcome = "beta.outcome", BetaExposure = "beta.exposure", 
+          SdOutcome = "se.outcome", SdExposure = "se.exposure", OUTLIERtest = TRUE, 
+          DISTORTIONtest = TRUE, data = dat.LDL.final, NbDistribution = 1000,  
+          SignifThreshold = 0.05)
+
+result.mrpresso.LDL<- Mr.presso.LDL$`Main MR results`
+
+result.mrpresso.LDL <- result.mrpresso.LDL %>% mutate(Exposure="LDL")
+
+## MR presso didnot show and outlier or horizontal pleiotropie
+## horizontal pleitropie
+#Mr.presso.LDL.pleoi<- do.call(rbind.data.frame,Mr.presso.LDL$`MR-PRESSO results`)
+#Mr.presso.LDL.pleoi$Exposure<- "LDL"
+final.mr.presso.LDL<-result.mrpresso.LDL
+
+### create a forest plot 
+p2 <- mr_forest_plot(res_single.LDL)
+p2[[1]]
+
+## scatter plot 
+p1 <- mr_scatter_plot(res.MR.LDL, dat.LDL.final)
+p1[[1]]
+
+### save the results of single variant MR and overall MR
+path="/Users/catherine/Documents/result GWAS aorta diameter/MR_results/"
+
+png(paste0(path,"scatter_plot_LDl_MR.tiff"))
+p1[[1]]
+dev.off()
+
+png("/Users/catherine/Documents/result GWAS aorta diameter/MR_results/singleSNP_plot_LDl_MR.tiff",width = 800,height = 1000)
+p2[[1]]
+dev.off()
+dat.LDL.final$pval.exposure <- as.numeric(dat.LDL.final$pval.exposure)
+LDL.direct<- directionality_test(dat.LDL.final)
+mr_report(dat.LDL.final)
+
+```
+</p>
+<details>
+
+
+
+### I.2 MR for HDL
+<details><summary>CLICK ME</summary>
+<p>
+```{r, echo=T,warning=F}
+### get the HDL GWAS summary stat 
+HDL_gwas<- fread("/Users/catherine/Box/MVP-CAP other local/Manuscripts/MVP lipids GWAS/MVP_Lipid_Summary_Statistics/EUR_EasyQC/CLEANED.MVP.Euro.HDL.results.EQC.csv.gz")
+
+### extract all the SNPs with p<5e
+HDL.sign<- HDL_gwas %>% filter(PVAL<5e-08,PVAL>0,IMPUTATION>0.8) %>% 
+                        mutate(chr=as.integer(sapply(strsplit(cptid,":"),"[",1)),
+                               pos=as.integer(sapply(strsplit(cptid,":"),"[",2)),
+                               SNP=cptid,phenotype="HDL cholesterol")
+                               
+### format the HDL as exposure
+
+HDL.expo.data<- format_data(HDL.sign,
+                            snps=HDL.sign$SNP,
+                            type = "exposure",
+                            phenotype = "phenotype",
+                            beta_col = "BETA",
+                            eaf_col = "EAF",
+                            se_col = "SE",
+                            effect_allele_col = "EFFECT_ALLELE",
+                            other_allele_col = "OTHER_ALLELE",
+                            pval_col = "PVAL",
+                            samplesize_col = "N",
+                            chr_col = "chr",
+                            pos_col = "pos",
+                            min_pval = "1e-303")
+
+
+#### harmonize AOD GWAS and the HDL exposure 
+
+#### create the outcome for the results
+AoD_HDL.outcome<- format_data(AoD.gwas,
+                            snps=HDL.sign$SNP,
+                            snp_col = "cptid",
+                            type = "outcome",
+                            phenotype = "outcome",
+                            beta_col = "BETA",
+                            eaf_col = "EAF",
+                            se_col = "SE",
+                            effect_allele_col = "EFFECT_ALLELE",
+                            other_allele_col = "OTHER_ALLELE",
+                            pval_col = "PVAL",
+                            samplesize_col = "N",
+                            chr_col = "CHR",
+                            pos_col = "POS")
+
+## Harmonized the exposure and outcome data
+dat.HDL <- harmonise_data(
+  exposure_dat = HDL.expo.data, 
+  outcome_dat = AoD_HDL.outcome)
+
+### keep only the set of SNP that will be use in the MR
+dat.HDL<- dat.HDL %>% filter(mr_keep==TRUE)
+
+snp.data<- dat.HDL %>% mutate(chr_name=chr.exposure,chrom_start=pos.exposure) %>% 
+  select(SNP,chr_name,chrom_start,pval.exposure)
+
+### merge the clump with the rsid from 1000g 
+snp.data <- merge(EUR1000g.bim,snp.data,by.x="chr_pos",by.y = "SNP")
+
+snp.data <- snp.data %>% rename(SNP="snp") 
+
+### clump the harmonized data
+clump.HDL<- clump_data(snp.data) ### after clumping, 88 SNPs were available for the MR
+
+### extract the final set of SNP for the mr
+dat.HDL.final<- dat.HDL %>% filter(SNP%in%clump.HDL$chr_pos)
+res.MR.HDL<-mr(dat.HDL.final)
+
+### check for heterogeneity and pleiotropie
+HDL.het<-mr_heterogeneity(dat.HDL.final) ### heterogenity significant p=0.02  
+
+## pleio
+HDL.pleio<-mr_pleiotropy_test(dat.HDL.final) ## pleiotropie not signicicant 
+
+### perform a leave out MR
+res_loo.HDL <- mr_leaveoneout(dat.HDL.final) ### no association 
+
+## single level MR 
+res_single.HDL <- mr_singlesnp(dat.HDL.final) ## no signifcant association if MTC applied
+
+### use MR PRESSO to systematicaly evaluate pleiotropie, heterogeneity and remove outlier SNPs 
+Mr.presso.HDL <-mr_presso(BetaOutcome = "beta.outcome", BetaExposure = "beta.exposure", 
+          SdOutcome = "se.outcome", SdExposure = "se.exposure", OUTLIERtest = TRUE, 
+          DISTORTIONtest = TRUE, data = dat.HDL.final, NbDistribution = 1000,  
+          SignifThreshold = 0.05)
+
+result.mrpresso.HDL<- Mr.presso.HDL$`Main MR results`
+
+result.mrpresso.HDL <- result.mrpresso.HDL %>% mutate(Exposure="HDL")
+
+## MR presso didnot show and outlier or horizontal pleiotropie
+## horizontal pleitropie
+#Mr.presso.HDL.pleoi<- do.call(rbind.data.frame,Mr.presso.HDL$`MR-PRESSO results`)
+#Mr.presso.HDL.pleoi$Exposure<- "HDL"
+final.mr.presso.HDL<-result.mrpresso.HDL
+
+### create a forest plot 
+p2 <- mr_forest_plot(res_single.HDL)
+p2[[1]]
+
+## scatter plot 
+p1 <- mr_scatter_plot(res.MR.HDL, dat.HDL.final)
+p1[[1]]
+
+### save the results of single variant MR and overall MR
+path="/Users/catherine/Documents/result GWAS aorta diameter/MR_results/"
+
+png(paste0(path,"scatter_plot_HDL_MR.tiff"))
+p1[[1]]
+dev.off()
+
+png("/Users/catherine/Documents/result GWAS aorta diameter/MR_results/singleSNP_plot_HDL_MR.tiff",width = 800,height = 1000)
+p2[[1]]
+dev.off()
+HDL.direct<-directionality_test(dat.HDL.final)
+
+dat.HDL.final$pval.exposure <- as.numeric(dat.HDL.final$pval.exposure)
+HDL.direct<- directionality_test(dat.HDL.final)
+```
+</p>
+</details>
+### I.3 MR for TG
+<details><summary>CLICK ME</summary>
+<p>
+```{r, echo=T,warning=F,include=F}
+### get the TG GWAS summary stat 
+TG_gwas<- fread("/Users/catherine/Box/MVP-CAP other local/Manuscripts/MVP lipids GWAS/MVP_Lipid_Summary_Statistics/EUR_EasyQC/CLEANED.MVP.Euro.TG.results.EQC.csv.gz")
+
+### extract all the SNPs with p<5e
+TG.sign<- TG_gwas %>% filter(PVAL<5e-08,PVAL>0,IMPUTATION>0.8) %>% 
+                        mutate(chr=as.integer(sapply(strsplit(cptid,":"),"[",1)),
+                               pos=as.integer(sapply(strsplit(cptid,":"),"[",2)),
+                               SNP=cptid,phenotype="TG cholesterol")
+                               
+### format the TG as exposure
+
+TG.expo.data<- format_data(TG.sign,
+                            snps=TG.sign$SNP,
+                            type = "exposure",
+                            phenotype = "phenotype",
+                            beta_col = "BETA",
+                            eaf_col = "EAF",
+                            se_col = "SE",
+                            effect_allele_col = "EFFECT_ALLELE",
+                            other_allele_col = "OTHER_ALLELE",
+                            pval_col = "PVAL",
+                            samplesize_col = "N",
+                            chr_col = "chr",
+                            pos_col = "pos",
+                            min_pval = 1e-314)
+
+
+#### harmonize AOD GWAS and the TG exposure 
+
+#### create the outcome for the results
+AoD_TG.outcome<- format_data(AoD.gwas,
+                            snps=TG.sign$SNP,
+                            snp_col = "cptid",
+                            type = "outcome",
+                            phenotype = "outcome",
+                            beta_col = "BETA",
+                            eaf_col = "EAF",
+                            se_col = "SE",
+                            effect_allele_col = "EFFECT_ALLELE",
+                            other_allele_col = "OTHER_ALLELE",
+                            pval_col = "PVAL",
+                            samplesize_col = "N",
+                            chr_col = "CHR",
+                            pos_col = "POS")
+
+## Harmonized the exposure and outcome data
+dat.TG <- harmonise_data(
+  exposure_dat = TG.expo.data, 
+  outcome_dat = AoD_TG.outcome
+)
+
+
+### keep only the set of SNP that will be use in the MR
+dat.TG<- dat.TG %>% filter(mr_keep==TRUE)
+
+snp.data<- dat.TG %>% mutate(chr_name=chr.exposure,chrom_start=pos.exposure) %>% 
+  select(SNP,chr_name,chrom_start,pval.exposure)
+
+### merge the clump with the rsid from 1000g 
+snp.data <- merge(EUR1000g.bim,snp.data,by.x="chr_pos",by.y = "SNP")
+
+snp.data <- snp.data %>% rename(SNP="snp") 
+
+### clump the harmonized data
+clump.TG<- clump_data(snp.data) ### after clumping, 88 SNPs were available for the MR
+
+### extract the final set of SNP for the mr
+dat.TG.final<- dat.TG %>% filter(SNP%in%clump.TG$chr_pos)
+res.MR.TG<-mr(dat.TG.final)
+
+### check for heterogeneity and pleiotropie
+TG.het<-mr_heterogeneity(dat.TG.final) ### heterogenity significant 
+
+## pleio
+TG.pleio<-mr_pleiotropy_test(dat.TG.final) ## pleiotropie not signicicant 
+
+### perform a leave out MR
+res_loo.TG <- mr_leaveoneout(dat.TG.final) ### no association 
+
+## single level MR 
+res_single.TG <- mr_singlesnp(dat.TG.final) ## no signifcant association if MTC applied
+
+### use MR PRESSO to systematicaly evaluate pleiotropie, heterogeneity and remove outlier SNPs 
+Mr.presso.TG <-mr_presso(BetaOutcome = "beta.outcome", BetaExposure = "beta.exposure", 
+          SdOutcome = "se.outcome", SdExposure = "se.exposure", OUTLIERtest = TRUE, 
+          DISTORTIONtest = TRUE, data = dat.TG.final, NbDistribution = 1000,  
+          SignifThreshold = 0.05)
+
+result.mrpresso.TG<- Mr.presso.TG$`Main MR results`
+
+result.mrpresso.TG <- result.mrpresso.TG %>% mutate(Exposure="TG")
+
+## MR presso didnot show and outlier or horizontal pleiotropie
+Mr.presso.TG.pleoi<- data.frame(Mr.presso.TG$`MR-PRESSO results`$`Global Test`)
+Mr.presso.TG.dist<- data.frame(Mr.presso.TG$`MR-PRESSO results`$`Distortion Test`)
+Mr.presso.TG.pleoi$Exposure<- "TG"
+Mr.presso.TG.pleoi$p.pleio<- Mr.presso.TG.pleoi$Pvalue
+final.mr.presso.PP<- merge(result.mrpresso.PP,Mr.presso.PP.pleoi,all=T)
+
+### rerun MR after outlier removal
+## remove all the outlier 
+dat.TG.final<- dat.TG.final[!row.names(dat.TG.final)%in%Mr.presso.TG.dist$Outliers.Indices,]
+
+res.MR.PP<-mr(dat.TG.final)
+## horizontal pleitropie
+Mr.presso.TG.pleoi<- do.call(rbind.data.frame,Mr.presso.TG$`MR-PRESSO results`)
+Mr.presso.TG.pleoi$Exposure<- "TG"
+final.mr.presso.TG<-result.mrpresso.TG
+
+TG.direct<- directionality_test(dat.TG.final)
+### create a forest plot 
+p2 <- mr_forest_plot(res_single.TG)
+p2[[1]]
+
+## scatter plot 
+p1 <- mr_scatter_plot(res.MR.TG, dat.TG.final)
+p1[[1]]
+
+### save the results of single variant MR and overall MR
+path="/Users/catherine/Documents/result GWAS aorta diameter/MR_results/"
+
+png(paste0(path,"scatter_plot_TG_MR.tiff"))
+p1[[1]]
+dev.off()
+
+png("/Users/catherine/Documents/result GWAS aorta diameter/MR_results/singleSNP_plot_TG_MR.tiff",width = 800,height = 1000)
+p2[[1]]
+dev.off()
+
+```
+</p>
+</details>
+
+### I.4 MR for Total cholesterol
+<details><summary>CLICK ME</summary>
+<p>
+```{r, echo=T,warning=F}
+### get the TC GWAS summary stat 
+TC_gwas<- fread("/Users/catherine/Box/MVP-CAP other local/Manuscripts/MVP lipids GWAS/MVP_Lipid_Summary_Statistics/EUR_EasyQC/CLEANED.MVP.Euro.TC.results.EQC.csv.gz")
+
+### extract all the SNPs with p<5e
+TC.sign<- TC_gwas %>% filter(PVAL<5e-08,PVAL>0,IMPUTATION>0.8) %>% 
+                        mutate(chr=as.integer(sapply(strsplit(cptid,":"),"[",1)),
+                               pos=as.integer(sapply(strsplit(cptid,":"),"[",2)),
+                               SNP=cptid,phenotype="TC cholesterol")
+                               
+### format the TC as exposure
+
+TC.expo.data<- format_data(TC.sign,
+                            snps=TC.sign$SNP,
+                            type = "exposure",
+                            phenotype = "phenotype",
+                            beta_col = "BETA",
+                            eaf_col = "EAF",
+                            se_col = "SE",
+                            effect_allele_col = "EFFECT_ALLELE",
+                            other_allele_col = "OTHER_ALLELE",
+                            pval_col = "PVAL",
+                            samplesize_col = "N",
+                            chr_col = "chr",
+                            pos_col = "pos",
+                            min_pval = 1e-314)
+
+
+#### harmonize AOD GWAS and the TC exposure 
+
+#### create the outcome for the results
+AoD_TC.outcome<- format_data(AoD.gwas,
+                            snps=TC.sign$SNP,
+                            snp_col = "cptid",
+                            type = "outcome",
+                            phenotype = "outcome",
+                            beta_col = "BETA",
+                            eaf_col = "EAF",
+                            se_col = "SE",
+                            effect_allele_col = "EFFECT_ALLELE",
+                            other_allele_col = "OTHER_ALLELE",
+                            pval_col = "PVAL",
+                            samplesize_col = "N",
+                            chr_col = "CHR",
+                            pos_col = "POS")
+
+## Harmonized the exposure and outcome data
+dat.TC <- harmonise_data(
+  exposure_dat = TC.expo.data, 
+  outcome_dat = AoD_TC.outcome
+)
+
+
+### keep only the set of SNP that will be use in the MR
+dat.TC<- dat.TC %>% filter(mr_keep==TRUE)
+
+snp.data<- dat.TC %>% mutate(chr_name=chr.exposure,chrom_start=pos.exposure) %>% 
+  select(SNP,chr_name,chrom_start,pval.exposure)
+
+### merge the clump with the rsid from 1000g 
+snp.data <- merge(EUR1000g.bim,snp.data,by.x="chr_pos",by.y = "SNP")
+
+snp.data <- snp.data %>% rename(SNP="snp") 
+
+### clump the harmonized data
+clump.TC<- clump_data(snp.data) ### after clumping, 88 SNPs were available for the MR
+
+### extract the final set of SNP for the mr
+dat.TC.final<- dat.TC %>% filter(SNP%in%clump.TC$chr_pos)
+res.MR.TC<-mr(dat.TC.final)
+
+### check for heterogeneity and pleiotropie
+TC.het<-mr_heterogeneity(dat.TC.final) ### heterogenity significant 
+
+## pleio
+TC.pleio<-mr_pleiotropy_test(dat.TC.final) ## pleiotropie not signicicant 
+
+### perform a leave out MR
+res_loo.TC <- mr_leaveoneout(dat.TC.final) ### no association 
+
+## single level MR 
+res_single.TC <- mr_singlesnp(dat.TC.final) ## no signifcant association if MTC applied
+
+### use MR PRESSO to systematicaly evaluate pleiotropie, heterogeneity and remove outlier SNPs 
+Mr.presso.TC <-mr_presso(BetaOutcome = "beta.outcome", BetaExposure = "beta.exposure", 
+          SdOutcome = "se.outcome", SdExposure = "se.exposure", OUTLIERtest = TRUE, 
+          DISTORTIONtest = TRUE, data = dat.TC.final, NbDistribution = 1000,  
+          SignifThreshold = 0.05)
+
+result.mrpresso.TC<- Mr.presso.TC$`Main MR results`
+
+result.mrpresso.TC <- result.mrpresso.TC %>% mutate(Exposure="TC")
+
+TC.direct<- directionality_test(dat.TC.final)
+
+## MR presso didnot show and outlier or horizontal pleiotropie
+## horizontal pleitropie
+#Mr.presso.TC.pleoi<- do.call(rbind.data.frame,Mr.presso.TC$`MR-PRESSO results`)
+#Mr.presso.TC.pleoi$Exposure<- "TC"
+final.mr.presso.TC<-result.mrpresso.TC
+
+### create a forest plot 
+p2 <- mr_forest_plot(res_single.TC)
+p2[[1]]
+
+## scatter plot 
+p1 <- mr_scatter_plot(res.MR.TC, dat.TC.final)
+p1[[1]]
+
+### save the results of single variant MR and overall MR
+path="/Users/catherine/Documents/result GWAS aorta diameter/MR_results/"
+
+png(paste0(path,"scatter_plot_TC_MR.tiff"))
+p1[[1]]
+dev.off()
+
+png("/Users/catherine/Documents/result GWAS aorta diameter/MR_results/singleSNP_plot_TC_MR.tiff",width = 800,height = 1000)
+p2[[1]]
+dev.off()
+
+```
+</p>
+</details>
+
+#I.5 MR for LPA
+<details><summary>CLICK ME</summary>
+<p>
+```{r,warning=F}
+
+beta.lpa<- fread("/Users/catherine/Documents/result GWAS aorta diameter/beta_LPA_for_MR.txt")
+
+beta.lpa2<- beta.lpa %>% mutate(effect_allele=effect_allele,beta=beta_Cond,se=abs(SE_Cond),Phenotype="lpa_level") %>% select(ID,SNP,beta,se,effect_allele,eaf=MAF)
+
+lpa.exp<-format_data(beta.lpa2,type="exposure",phenotype_col = "Phenotype")
+
+
+### get the AoD outcome data with rsid
+outcome_dat.lpa <- format_data(AoD.gwas,
+                            snps=beta.lpa2$ID,
+                            snp_col = "cptid",
+                            type = "outcome",
+                            phenotype = "outcome",
+                            beta_col = "BETA",
+                            eaf_col = "EAF",
+                            se_col = "SE",
+                            effect_allele_col = "EFFECT_ALLELE",
+                            other_allele_col = "OTHER_ALLELE",
+                            pval_col = "PVAL",
+                            samplesize_col = "N",
+                            chr_col = "CHR",
+                            pos_col = "POS")
+
+outcome_dat.lpa$outcome="AoD"
+
+### merge with 1000 g
+outcome_dat.lpa2 <- merge(EUR1000g.bim,outcome_dat.lpa,by.x="chr_pos",by.y = "SNP")
+outcome_dat.lpa<- outcome_dat.lpa2 %>% rename(SNP='snp') %>% filter(!SNP%in%c("rs10455872","rs3798220"))
+## Harmonized the exposure and outcome data
+dat.lpa <- harmonise_data(
+  exposure_dat = lpa.exp, 
+  outcome_dat = outcome_dat.lpa
+)
+
+
+res.MR.lpa<-mr(dat.lpa)
+
+lpa.het<-mr_heterogeneity(dat.lpa)
+
+lpa.pleio<-mr_pleiotropy_test(dat.lpa)
+
+res_loo.lpa <- mr_leaveoneout(dat.lpa)
+res_single.lpa <- mr_singlesnp(dat.lpa)
+
+lpa.data.mr<- dat.lpa %>% select(SNP:eaf.outcome,se.outcome:outcome,se.exposure,pval.exposure)
+lpa.direct<- directionality_test(lpa.data.mr)
+get_r_from_lor(lpa.data.mr)
+p1 <- mr_scatter_plot(res.MR.lpa, dat.lpa)
+p1[[1]]
+
+p2 <- mr_forest_plot(res_single.lpa)
+p2[[1]]
+
+png("/Users/catherine/Documents/result GWAS aorta diameter/MR_results/singleSNP_plot_LPA_MR.tiff",width = 800,height = 1000)
+p2[[1]]
+dev.off()
+png("/Users/catherine/Documents/result GWAS aorta diameter/MR_results/plot_LPA_MR.tiff",width = 800,height = 800)
+p1[[1]]
+dev.off()
+### use MR PRESSO to systematicaly evaluate pleiotropie 
+Mr.presso.LPA<-mr_presso(BetaOutcome = "beta.outcome", BetaExposure = "beta.exposure", 
+                         SdOutcome = "se.outcome", SdExposure = "se.exposure", OUTLIERtest = TRUE, 
+                         DISTORTIONtest = TRUE, data = dat.lpa, NbDistribution = 1000,  
+                         SignifThreshold = 0.05)
+
+result.mrpresso.LPA<-Mr.presso.LPA$`Main MR results`
+result.mrpresso.LPA <- result.mrpresso.LPA %>% mutate(Exposure="LPa")
+
+## horizontal pleitropie
+Mr.presso.LPA.pleoi<- data.frame(Mr.presso.LPA$`MR-PRESSO results`$`Global Test`)
+Mr.presso.LPA.dist<- data.frame(Mr.presso.LPA$`MR-PRESSO results`$`Distortion Test`)
+Mr.presso.LPA.pleoi$Exposure<- "LPa"
+final.mr.presso.LPA<-result.mrpresso.LPA
+
+```
+</p>
+</details>
+
+### save all the lipids results 
+
+<details><summary>CLICK ME</summary>
+<p>
+```{r, echo=T,warning=F}
+### save all te results 
+## MR results 
+MR_resulst.lipids<- Reduce(function(x, y) merge(x, y, all=TRUE),list(res.MR.LDL,res.MR.HDL,res.MR.TG,res.MR.TC,res.MR.lpa))
+MR_Presso.lipids <- Reduce(function(x, y) merge(x, y, all=TRUE), list(final.mr.presso.LDL,final.mr.presso.HDL,final.mr.presso.TG,final.mr.presso.TC,result.mrpresso.LPA))
+het_MR_lipids<- Reduce(function(x, y) merge(x, y, all=TRUE), list(LDL.het,HDL.het,TG.het,TG.het,lpa.het))
+
+### merge heterogeneity and overall MR
+all_results_lipids<- merge(MR_resulst.lipids,het_MR_lipids,all=T)
+### single variants MR
+
+MR_single_SNP.lipids<- Reduce(function(x, y) merge(x, y, all=TRUE), list(res_single.LDL,res_single.HDL,res_single.TG,res_single.TC,res_single.lpa))
+
+### save all the MR results 
+fwrite(MR_resulst.lipids,paste0(path,"final_results_MR_lipids.csv"))
+fwrite(MR_Presso.lipids,paste0(path,"final_MR_Presso_lipids.csv"))
+fwrite(MR_single_SNP.lipids,paste0(path,"MR_single_SNP_lipids.csv"))
+fwrite(all_results_lipids,paste0(path,"final_results_lipids_and_het.csv"))
+fwrite(het_MR_lipids,paste0(path,"final_results_lipids_het.csv"))
+```
+</p>
+</details>
